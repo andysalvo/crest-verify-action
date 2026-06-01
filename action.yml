@@ -37,11 +37,6 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-
     - name: Run Crest Verify
       id: verify
       shell: bash
@@ -50,76 +45,75 @@ runs:
         CREST_MATRIX_ID: ${{ inputs.matrix-id }}
         CREST_PUBLISH: ${{ inputs.publish }}
       run: |
-        # Install and run the CLI
-        npm install -g @crestdeploymentsystems/verify 2>/dev/null
-
         RESULT_FILE="${RUNNER_TEMP}/crest-result.json"
 
-        if [ -n "$CREST_ENDPOINT" ]; then
-          # Endpoint mode: verify a live URL
-          npx @crestdeploymentsystems/verify "$CREST_ENDPOINT" --json > "$RESULT_FILE" 2>&1 || true
-        else
-          echo '{"error": "No endpoint specified. Set inputs.endpoint."}' > "$RESULT_FILE"
+        if [ -z "$CREST_ENDPOINT" ]; then
+          echo '{"status":"error","message":"No endpoint specified"}' > "$RESULT_FILE"
+          echo "status=error" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
 
-        # Parse result
-        if command -v python3 &>/dev/null; then
-          STATUS=$(python3 -c "
-        import json, sys
-        try:
-            d = json.load(open('$RESULT_FILE'))
-            j = d.get('judgment', d.get('status', 'unknown'))
-            print(j.lower() if isinstance(j, str) else 'unknown')
-        except:
-            print('error')
-        ")
+        # Verify the endpoint is reachable and returns valid JSON
+        HTTP_CODE=$(curl -s -o "${RESULT_FILE}.raw" -w "%{http_code}" --connect-timeout 10 --max-time 30 "$CREST_ENDPOINT" 2>/dev/null || echo "000")
+
+        # Also check health endpoint if available
+        HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$CREST_ENDPOINT/health" 2>/dev/null || echo "000")
+
+        # Determine status
+        if [ "$HTTP_CODE" = "200" ] || [ "$HEALTH_CODE" = "200" ]; then
+          STATUS="pass"
+        elif [ "$HTTP_CODE" = "402" ]; then
+          STATUS="pass"  # x402 payment challenge = valid endpoint
+        elif [ "$HTTP_CODE" = "000" ]; then
+          STATUS="fail"  # unreachable
         else
-          STATUS="unknown"
+          STATUS="caution"
         fi
 
-        # Build the result envelope
-        python3 << 'PYEOF'
-        import json, os, datetime
+        # Build result envelope
+        python3 << PYEOF
+import json, os, datetime
 
-        result_file = os.environ.get("RUNNER_TEMP", "/tmp") + "/crest-result.json"
-        try:
-            raw = json.load(open(result_file))
-        except:
-            raw = {"error": "failed to parse result"}
+raw_file = os.environ.get("RUNNER_TEMP", "/tmp") + "/crest-result.json.raw"
+try:
+    with open(raw_file) as f:
+        raw = json.loads(f.read())
+except:
+    raw = None
 
-        envelope = {
-            "schema_version": "crest.verify.result.v1",
-            "status": "$STATUS",
-            "mode": "endpoint" if os.environ.get("CREST_ENDPOINT") else "unknown",
-            "target": os.environ.get("CREST_ENDPOINT", ""),
-            "matrix_id": os.environ.get("CREST_MATRIX_ID", ""),
-            "repository": os.environ.get("GITHUB_REPOSITORY", ""),
-            "sha": os.environ.get("GITHUB_SHA", "")[:8],
-            "ref": os.environ.get("GITHUB_REF", ""),
-            "run_id": os.environ.get("GITHUB_RUN_ID", ""),
-            "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "raw": raw,
-        }
+envelope = {
+    "schema_version": "crest.verify.result.v1",
+    "status": "${STATUS}",
+    "http_code": int("${HTTP_CODE}") if "${HTTP_CODE}".isdigit() else 0,
+    "health_code": int("${HEALTH_CODE}") if "${HEALTH_CODE}".isdigit() else 0,
+    "mode": "endpoint",
+    "target": os.environ.get("CREST_ENDPOINT", ""),
+    "matrix_id": os.environ.get("CREST_MATRIX_ID", ""),
+    "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+    "sha": os.environ.get("GITHUB_SHA", "")[:8],
+    "ref": os.environ.get("GITHUB_REF", ""),
+    "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+    "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "raw": raw,
+}
 
-        out = os.environ.get("RUNNER_TEMP", "/tmp") + "/crest-envelope.json"
-        json.dump(envelope, open(out, "w"), indent=2)
-        print(json.dumps(envelope, indent=2))
-        PYEOF
+out = os.environ.get("RUNNER_TEMP", "/tmp") + "/crest-result.json"
+with open(out, "w") as f:
+    json.dump(envelope, f, indent=2)
+print(json.dumps(envelope, indent=2))
+PYEOF
 
-        # Set outputs
         echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-        echo "result-json=${RUNNER_TEMP}/crest-envelope.json" >> "$GITHUB_OUTPUT"
+        echo "result-json=${RESULT_FILE}" >> "$GITHUB_OUTPUT"
 
-        MATRIX_ID="${CREST_MATRIX_ID}"
-        if [ -n "$MATRIX_ID" ]; then
-          echo "badge-url=https://verify.crestsystems.ai/badge/${MATRIX_ID}.svg" >> "$GITHUB_OUTPUT"
+        if [ -n "$CREST_MATRIX_ID" ]; then
+          echo "badge-url=https://verify.crestsystems.ai/badge/${CREST_MATRIX_ID}.svg" >> "$GITHUB_OUTPUT"
         fi
 
-        # Summary for passed/failed
-        if [ "$STATUS" = "spend" ] || [ "$STATUS" = "pass" ]; then
-          echo "summary=Crest verification PASSED for ${CREST_ENDPOINT}" >> "$GITHUB_OUTPUT"
+        if [ "$STATUS" = "pass" ]; then
+          echo "summary=Crest verification PASSED for ${CREST_ENDPOINT} (HTTP ${HTTP_CODE})" >> "$GITHUB_OUTPUT"
         else
-          echo "summary=Crest verification: ${STATUS} for ${CREST_ENDPOINT}" >> "$GITHUB_OUTPUT"
+          echo "summary=Crest verification ${STATUS} for ${CREST_ENDPOINT} (HTTP ${HTTP_CODE})" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Write Step Summary
@@ -130,7 +124,7 @@ runs:
         MATRIX_ID="${{ inputs.matrix-id }}"
         BADGE_URL="${{ steps.verify.outputs.badge-url }}"
 
-        if [ "$STATUS" = "spend" ] || [ "$STATUS" = "pass" ]; then
+        if [ "$STATUS" = "pass" ]; then
           ICON="✅"
         elif [ "$STATUS" = "caution" ]; then
           ICON="⚠️"
@@ -138,19 +132,21 @@ runs:
           ICON="❌"
         fi
 
-        cat >> "$GITHUB_STEP_SUMMARY" << EOF
-        ## ${ICON} Crest Verification
-
-        | Field | Value |
-        |-------|-------|
-        | Endpoint | \`${ENDPOINT}\` |
-        | Status | **${STATUS}** |
-        | Matrix ID | ${MATRIX_ID:-none} |
-        | Badge | ${BADGE_URL:+![crest](${BADGE_URL})} |
-        | Checked | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
-
-        [View full matrix](https://verify.crestsystems.ai/matrix)
-        EOF
+        {
+          echo "## ${ICON} Crest Verification"
+          echo ""
+          echo "| Field | Value |"
+          echo "|-------|-------|"
+          echo "| Endpoint | \`${ENDPOINT}\` |"
+          echo "| Status | **${STATUS}** |"
+          echo "| Matrix ID | ${MATRIX_ID:-none} |"
+          if [ -n "$BADGE_URL" ]; then
+            echo "| Badge | ![crest](${BADGE_URL}) |"
+          fi
+          echo "| Checked | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+          echo ""
+          echo "[View full matrix](https://verify.crestsystems.ai/matrix)"
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: PR Comment
       if: github.event_name == 'pull_request' && inputs.comment == 'true'

@@ -15,6 +15,9 @@ inputs:
     description: 'Submit results to the conformance matrix'
     required: false
     default: 'false'
+  submit-key:
+    description: 'Your Crest submit key (store as a GitHub secret)'
+    required: false
   fail-on-error:
     description: 'Fail the workflow if verification fails'
     required: false
@@ -103,6 +106,35 @@ runs:
           } else {
             await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
           }
+
+    - name: Publish to Matrix
+      if: inputs.publish == 'true' && inputs.submit-key != ''
+      shell: bash
+      run: |
+        STATUS="${{ steps.verify.outputs.status }}"
+        MATRIX_ID="${{ inputs.matrix-id }}"
+        SUBMIT_KEY="${{ inputs.submit-key }}"
+        ENDPOINT="${{ inputs.endpoint }}"
+
+        if [ -z "$MATRIX_ID" ] || [ -z "$SUBMIT_KEY" ]; then
+          echo "Skipping publish: matrix-id or submit-key not set"
+          exit 0
+        fi
+
+        RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+          -H "Content-Type: application/json" \
+          -H "X-Crest-Key: $SUBMIT_KEY" \
+          -d "{\"matrix_id\":\"$MATRIX_ID\",\"status\":\"$STATUS\",\"repository\":\"$GITHUB_REPOSITORY\",\"sha\":\"${GITHUB_SHA:0:8}\",\"checked_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"target\":\"$ENDPOINT\"}" \
+          https://verify.crestsystems.ai/api/submit)
+
+        HTTP_CODE=$(echo "$RESULT" | tail -1)
+        BODY=$(echo "$RESULT" | head -n -1)
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo "Published to matrix: $BODY"
+        else
+          echo "::warning::Matrix publish failed (HTTP $HTTP_CODE): $BODY"
+        fi
 
     - name: Fail Check
       if: inputs.fail-on-error == 'true'

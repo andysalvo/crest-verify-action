@@ -53,7 +53,7 @@ After verification, add to your README:
 [![CREST conformance](https://verify.crestsystems.ai/badge/YOUR-ID.svg)](https://verify.crestsystems.ai/matrix)
 ```
 
-## Full Example
+## Full Example (with auto-publish)
 
 ```yaml
 name: Crest Verify
@@ -74,10 +74,18 @@ jobs:
           endpoint: https://your-service.com
           matrix-id: cm-004
           publish: true
+          submit-key: ${{ secrets.CREST_SUBMIT_KEY }}
 
       - name: Check result
         run: echo "Status: ${{ steps.crest.outputs.status }}"
 ```
+
+### Setting up auto-publish
+
+1. Get your submit key from Crest (one per matrix entry)
+2. Add it as a GitHub secret: `CREST_SUBMIT_KEY`
+3. Set `publish: true` and `submit-key: ${{ secrets.CREST_SUBMIT_KEY }}`
+4. Every passing CI run auto-updates your matrix entry and badge
 
 ## Conformance Matrix
 

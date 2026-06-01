@@ -1,18 +1,18 @@
 name: 'Crest Verify'
-description: 'Run Crest conformance verification on your endpoint or fixtures. Get a badge.'
+description: 'Run Crest conformance verification on your endpoint. Get a badge.'
 branding:
   icon: 'check-circle'
   color: 'green'
 
 inputs:
   endpoint:
-    description: 'URL to verify (e.g., https://your-service.com)'
-    required: false
+    description: 'URL to verify'
+    required: true
   matrix-id:
-    description: 'Your matrix entry ID (e.g., cm-004). Required for badge updates.'
+    description: 'Your matrix entry ID (e.g., cm-004)'
     required: false
   publish:
-    description: 'Submit results to the Crest conformance matrix'
+    description: 'Submit results to the conformance matrix'
     required: false
     default: 'false'
   fail-on-error:
@@ -26,127 +26,65 @@ inputs:
 
 outputs:
   status:
-    description: 'Verification result: pass, fail, error'
-  result-json:
-    description: 'Path to the result JSON file'
+    description: 'pass, fail, caution, or error'
   badge-url:
-    description: 'Badge URL for this entry'
+    description: 'Badge URL for your matrix entry'
   summary:
-    description: 'Human-readable result summary'
+    description: 'Human-readable result'
 
 runs:
   using: 'composite'
   steps:
-    - name: Run Crest Verify
+    - name: Verify Endpoint
       id: verify
       shell: bash
-      env:
-        CREST_ENDPOINT: ${{ inputs.endpoint }}
-        CREST_MATRIX_ID: ${{ inputs.matrix-id }}
-        CREST_PUBLISH: ${{ inputs.publish }}
       run: |
-        RESULT_FILE="${RUNNER_TEMP}/crest-result.json"
+        ENDPOINT="${{ inputs.endpoint }}"
+        MATRIX_ID="${{ inputs.matrix-id }}"
 
-        if [ -z "$CREST_ENDPOINT" ]; then
-          echo '{"status":"error","message":"No endpoint specified"}' > "$RESULT_FILE"
-          echo "status=error" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 30 "$ENDPOINT" 2>/dev/null || echo "000")
+        HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "${ENDPOINT}/health" 2>/dev/null || echo "000")
 
-        # Verify the endpoint is reachable and returns valid JSON
-        HTTP_CODE=$(curl -s -o "${RESULT_FILE}.raw" -w "%{http_code}" --connect-timeout 10 --max-time 30 "$CREST_ENDPOINT" 2>/dev/null || echo "000")
-
-        # Also check health endpoint if available
-        HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 "$CREST_ENDPOINT/health" 2>/dev/null || echo "000")
-
-        # Determine status
         if [ "$HTTP_CODE" = "200" ] || [ "$HEALTH_CODE" = "200" ]; then
           STATUS="pass"
         elif [ "$HTTP_CODE" = "402" ]; then
-          STATUS="pass"  # x402 payment challenge = valid endpoint
+          STATUS="pass"
         elif [ "$HTTP_CODE" = "000" ]; then
-          STATUS="fail"  # unreachable
+          STATUS="fail"
         else
           STATUS="caution"
         fi
 
-        # Build result envelope
-        python3 << PYEOF
-import json, os, datetime
-
-raw_file = os.environ.get("RUNNER_TEMP", "/tmp") + "/crest-result.json.raw"
-try:
-    with open(raw_file) as f:
-        raw = json.loads(f.read())
-except:
-    raw = None
-
-envelope = {
-    "schema_version": "crest.verify.result.v1",
-    "status": "${STATUS}",
-    "http_code": int("${HTTP_CODE}") if "${HTTP_CODE}".isdigit() else 0,
-    "health_code": int("${HEALTH_CODE}") if "${HEALTH_CODE}".isdigit() else 0,
-    "mode": "endpoint",
-    "target": os.environ.get("CREST_ENDPOINT", ""),
-    "matrix_id": os.environ.get("CREST_MATRIX_ID", ""),
-    "repository": os.environ.get("GITHUB_REPOSITORY", ""),
-    "sha": os.environ.get("GITHUB_SHA", "")[:8],
-    "ref": os.environ.get("GITHUB_REF", ""),
-    "run_id": os.environ.get("GITHUB_RUN_ID", ""),
-    "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    "raw": raw,
-}
-
-out = os.environ.get("RUNNER_TEMP", "/tmp") + "/crest-result.json"
-with open(out, "w") as f:
-    json.dump(envelope, f, indent=2)
-print(json.dumps(envelope, indent=2))
-PYEOF
-
         echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-        echo "result-json=${RESULT_FILE}" >> "$GITHUB_OUTPUT"
+        echo "http-code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
 
-        if [ -n "$CREST_MATRIX_ID" ]; then
-          echo "badge-url=https://verify.crestsystems.ai/badge/${CREST_MATRIX_ID}.svg" >> "$GITHUB_OUTPUT"
+        if [ -n "$MATRIX_ID" ]; then
+          echo "badge-url=https://verify.crestsystems.ai/badge/${MATRIX_ID}.svg" >> "$GITHUB_OUTPUT"
         fi
 
-        if [ "$STATUS" = "pass" ]; then
-          echo "summary=Crest verification PASSED for ${CREST_ENDPOINT} (HTTP ${HTTP_CODE})" >> "$GITHUB_OUTPUT"
-        else
-          echo "summary=Crest verification ${STATUS} for ${CREST_ENDPOINT} (HTTP ${HTTP_CODE})" >> "$GITHUB_OUTPUT"
-        fi
+        echo "summary=Crest: $STATUS ($ENDPOINT, HTTP $HTTP_CODE)" >> "$GITHUB_OUTPUT"
 
-    - name: Write Step Summary
+    - name: Step Summary
       shell: bash
       run: |
         STATUS="${{ steps.verify.outputs.status }}"
         ENDPOINT="${{ inputs.endpoint }}"
         MATRIX_ID="${{ inputs.matrix-id }}"
-        BADGE_URL="${{ steps.verify.outputs.badge-url }}"
+        BADGE="${{ steps.verify.outputs.badge-url }}"
+        HTTP="${{ steps.verify.outputs.http-code }}"
 
-        if [ "$STATUS" = "pass" ]; then
-          ICON="✅"
-        elif [ "$STATUS" = "caution" ]; then
-          ICON="⚠️"
-        else
-          ICON="❌"
-        fi
+        if [ "$STATUS" = "pass" ]; then ICON="✅"; elif [ "$STATUS" = "caution" ]; then ICON="⚠️"; else ICON="❌"; fi
 
-        {
-          echo "## ${ICON} Crest Verification"
-          echo ""
-          echo "| Field | Value |"
-          echo "|-------|-------|"
-          echo "| Endpoint | \`${ENDPOINT}\` |"
-          echo "| Status | **${STATUS}** |"
-          echo "| Matrix ID | ${MATRIX_ID:-none} |"
-          if [ -n "$BADGE_URL" ]; then
-            echo "| Badge | ![crest](${BADGE_URL}) |"
-          fi
-          echo "| Checked | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
-          echo ""
-          echo "[View full matrix](https://verify.crestsystems.ai/matrix)"
-        } >> "$GITHUB_STEP_SUMMARY"
+        echo "## $ICON Crest Verification" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+        echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Endpoint | \`$ENDPOINT\` |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Status | **$STATUS** (HTTP $HTTP) |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Matrix | ${MATRIX_ID:-not set} |" >> "$GITHUB_STEP_SUMMARY"
+        if [ -n "$BADGE" ]; then echo "| Badge | ![crest]($BADGE) |" >> "$GITHUB_STEP_SUMMARY"; fi
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "[View matrix](https://verify.crestsystems.ai/matrix)" >> "$GITHUB_STEP_SUMMARY"
 
     - name: PR Comment
       if: github.event_name == 'pull_request' && inputs.comment == 'true'
@@ -155,56 +93,23 @@ PYEOF
         script: |
           const status = '${{ steps.verify.outputs.status }}';
           const endpoint = '${{ inputs.endpoint }}';
-          const badgeUrl = '${{ steps.verify.outputs.badge-url }}';
-          const icon = (status === 'spend' || status === 'pass') ? '✅' : '❌';
-
-          const body = `## ${icon} Crest Verification\n\n` +
-            `**Endpoint:** \`${endpoint}\`\n` +
-            `**Status:** ${status}\n` +
-            (badgeUrl ? `**Badge:** ![crest](${badgeUrl})\n` : '') +
-            `\n[View matrix](https://verify.crestsystems.ai/matrix)`;
-
-          const { data: comments } = await github.rest.issues.listComments({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-          });
+          const badge = '${{ steps.verify.outputs.badge-url }}';
+          const icon = status === 'pass' ? '✅' : '❌';
+          const body = `## ${icon} Crest Verification\n\n**Endpoint:** \`${endpoint}\`\n**Status:** ${status}\n${badge ? `![crest](${badge})\n` : ''}\n[View matrix](https://verify.crestsystems.ai/matrix)`;
+          const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number });
           const existing = comments.find(c => c.body.includes('Crest Verification'));
-
           if (existing) {
-            await github.rest.issues.updateComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: existing.id,
-              body,
-            });
+            await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
           } else {
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });
+            await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
           }
 
-    - name: Publish to Matrix
-      if: inputs.publish == 'true'
-      shell: bash
-      run: |
-        ENVELOPE="${RUNNER_TEMP}/crest-envelope.json"
-        if [ -f "$ENVELOPE" ]; then
-          curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -d @"$ENVELOPE" \
-            "https://verify.crestsystems.ai/api/submit" || true
-        fi
-
-    - name: Fail on Error
+    - name: Fail Check
       if: inputs.fail-on-error == 'true'
       shell: bash
       run: |
         STATUS="${{ steps.verify.outputs.status }}"
-        if [ "$STATUS" != "spend" ] && [ "$STATUS" != "pass" ] && [ "$STATUS" != "caution" ]; then
-          echo "::error::Crest verification failed with status: $STATUS"
+        if [ "$STATUS" != "pass" ] && [ "$STATUS" != "caution" ]; then
+          echo "::error::Crest verification failed: $STATUS"
           exit 1
         fi

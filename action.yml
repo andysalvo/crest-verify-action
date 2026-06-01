@@ -91,14 +91,20 @@ runs:
 
     - name: PR Comment
       if: github.event_name == 'pull_request' && inputs.comment == 'true'
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
       with:
         script: |
           const status = '${{ steps.verify.outputs.status }}';
           const endpoint = '${{ inputs.endpoint }}';
           const badge = '${{ steps.verify.outputs.badge-url }}';
           const icon = status === 'pass' ? '✅' : '❌';
-          const body = `## ${icon} Crest Verification\n\n**Endpoint:** \`${endpoint}\`\n**Status:** ${status}\n${badge ? `![crest](${badge})\n` : ''}\n[View matrix](https://verify.crestsystems.ai/matrix)`;
+          const body = `## ${icon} Crest Verification
+
+**Endpoint:** \`${endpoint}\`
+**Status:** ${status}
+${badge ? `![crest](${badge})
+` : ''}
+[View matrix](https://verify.crestsystems.ai/matrix)`;
           const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number });
           const existing = comments.find(c => c.body.includes('Crest Verification'));
           if (existing) {
@@ -121,7 +127,8 @@ runs:
           exit 0
         fi
 
-        RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+        RESULT=$(curl -s -w "
+%{http_code}" -X POST \
           -H "Content-Type: application/json" \
           -H "X-Crest-Key: $SUBMIT_KEY" \
           -d "{\"matrix_id\":\"$MATRIX_ID\",\"status\":\"$STATUS\",\"repository\":\"$GITHUB_REPOSITORY\",\"sha\":\"${GITHUB_SHA:0:8}\",\"checked_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"target\":\"$ENDPOINT\"}" \
